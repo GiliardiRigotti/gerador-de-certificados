@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+certificados.db
+certificados_emitidos.csv
+certificados_gerados/
+tmp/
+
+.env
+.streamlit/secrets.toml
