@@ -14,6 +14,13 @@ import pandas as pd
 import qrcode
 import streamlit as st
 
+from email_sender import (
+    EnviadorLote,
+    email_valido,
+    parse_planilha_destinatarios,
+    smtp_configurado,
+)
+
 from config import (
     ADMIN_PASSWORD,
     ADMIN_PASSWORD_SHA256,
@@ -59,6 +66,20 @@ WHITE = (1, 1, 1)
 
 CERTIFICATE_STATUSES = {"valido", "cancelado", "revogado"}
 
+# Colunas de e-mail adicionadas depois da primeira versao do banco.
+# Bancos existentes recebem estas colunas por ALTER TABLE em init_db().
+EMAIL_COLUMNS = {
+    "email": "TEXT",
+    "email_status": "TEXT NOT NULL DEFAULT 'sem_email'",
+    "email_enviado_em": "TEXT",
+    "email_erro": "TEXT",
+}
+
+EMAIL_STATUS_SEM_EMAIL = "sem_email"
+EMAIL_STATUS_NAO_ENVIADO = "nao_enviado"
+EMAIL_STATUS_ENVIADO = "enviado"
+EMAIL_STATUS_FALHOU = "falhou"
+
 
 def get_connection():
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -87,10 +108,18 @@ def init_db():
                 atualizado_em TEXT NOT NULL,
                 local TEXT,
                 url_validacao TEXT,
-                hash_pdf_sha256 TEXT
+                hash_pdf_sha256 TEXT,
+                email TEXT,
+                email_status TEXT NOT NULL DEFAULT 'sem_email',
+                email_enviado_em TEXT,
+                email_erro TEXT
             )
             """
         )
+        existentes = {row["name"] for row in conn.execute("PRAGMA table_info(certificados)")}
+        for coluna, ddl in EMAIL_COLUMNS.items():
+            if coluna not in existentes:
+                conn.execute(f"ALTER TABLE certificados ADD COLUMN {coluna} {ddl}")
         conn.commit()
 
 
@@ -120,6 +149,8 @@ def insert_certificate(row: dict):
         "local",
         "url_validacao",
         "hash_pdf_sha256",
+        "email",
+        "email_status",
     ]
     placeholders = ", ".join(["?"] * len(fields))
     with get_connection() as conn:
@@ -175,6 +206,52 @@ def update_certificate_status(code: str, status: str):
         conn.commit()
 
 
+def set_certificate_email(code: str, email: str):
+    """Grava so o endereco, sem mexer no status nem no historico de envio."""
+    agora = datetime.now().isoformat(timespec="seconds")
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE certificados SET email = ?, atualizado_em = ? WHERE codigo_unico = ?",
+            ((email or "").strip(), agora, code),
+        )
+        conn.commit()
+
+
+def update_certificate_email(code: str, email: str, status: str, erro: str = None):
+    """Grava o resultado do envio.
+
+    Uma tentativa que falha NUNCA apaga o endereco que ja funcionou nem a data
+    de uma entrega anterior: um reenvio para endereco digitado errado nao pode
+    destruir a prova de que o certificado foi entregue.
+    """
+    agora = datetime.now().isoformat(timespec="seconds")
+    email = (email or "").strip()
+    with get_connection() as conn:
+        if status == EMAIL_STATUS_ENVIADO:
+            conn.execute(
+                """
+                UPDATE certificados
+                SET email = ?, email_status = ?, email_erro = NULL,
+                    email_enviado_em = ?, atualizado_em = ?
+                WHERE codigo_unico = ?
+                """,
+                (email, status, agora, agora, code),
+            )
+        else:
+            # email_enviado_em fica de fora do SET: preserva a entrega anterior.
+            # O endereco so e gravado quando ainda nao havia nenhum.
+            conn.execute(
+                """
+                UPDATE certificados
+                SET email = COALESCE(NULLIF(email, ''), ?), email_status = ?,
+                    email_erro = ?, atualizado_em = ?
+                WHERE codigo_unico = ?
+                """,
+                (email, status, erro, agora, code),
+            )
+        conn.commit()
+
+
 def delete_certificate(code: str, delete_pdf: bool = False) -> bool:
     row = find_certificate(code)
     if not row:
@@ -201,6 +278,24 @@ def clean_filename(name: str) -> str:
     name = re.sub(r"[^A-Za-zÀ-ÿ0-9 _-]", "", name).strip()
     name = re.sub(r"\s+", "_", name)
     return name[:90] or "certificado"
+
+
+def unique_pdf_name(name: str, code: str, usados: set) -> str:
+    """Nome de arquivo unico dentro do lote.
+
+    clean_filename colapsa nomes diferentes no mesmo resultado ('Ana  Souza' e
+    'Ana Souza'), e devolve 'certificado' para nomes sem caracteres latinos
+    (chines, grego, arabe). Sem desambiguar, um PDF sobrescreve o outro e o
+    reenvio entrega a pessoa errada.
+    """
+    base = clean_filename(name)
+    if base == "certificado":
+        base = f"certificado_{code}"
+    nome_arquivo = f"certificado_{base}.pdf"
+    if nome_arquivo in usados:
+        nome_arquivo = f"certificado_{base}_{code}.pdf"
+    usados.add(nome_arquivo)
+    return nome_arquivo
 
 
 def split_names(raw: str):
@@ -309,47 +404,91 @@ def dataframe_to_csv_bytes(df: pd.DataFrame):
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
-def make_zip(template_bytes: bytes, names, body_text: str, replace_body: bool, prefix: str, event_name: str, cert_type: str, event_date: str, workload: str, location: str, city: str):
+def make_zip(template_bytes: bytes, names, body_text: str, replace_body: bool, prefix: str, event_name: str, cert_type: str, event_date: str, workload: str, location: str, city: str, emails: dict = None, enviar_emails: bool = False, progress_callback=None):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     zip_buffer = io.BytesIO()
     merged = fitz.open()
     registry_rows = []
     generated_at = datetime.now().isoformat(timespec="seconds")
 
+    email_lookup = {str(k).strip().lower(): (v or "").strip() for k, v in (emails or {}).items()}
+    resumo = {"enviados": 0, "falhas": 0, "sem_email": 0, "erros": []}
+    total = len(names)
+    nomes_de_arquivo = set()
+
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for name in names:
-            code = make_code(prefix)
-            validation_url = build_validation_url(code)
-            pdf_bytes = make_certificate(template_bytes, name, body_text, replace_body, code, validation_url, show_qr=True)
-            pdf_hash = hashlib.sha256(pdf_bytes).hexdigest()
-            pdf_name = f"certificado_{clean_filename(name)}.pdf"
-            pdf_path = OUTPUT_DIR / pdf_name
-            pdf_path.write_bytes(pdf_bytes)
+        with EnviadorLote(ativo=enviar_emails) as enviador:
+            for indice, name in enumerate(names, start=1):
+                code = make_code(prefix)
+                validation_url = build_validation_url(code)
+                pdf_bytes = make_certificate(template_bytes, name, body_text, replace_body, code, validation_url, show_qr=True)
+                pdf_hash = hashlib.sha256(pdf_bytes).hexdigest()
+                pdf_name = unique_pdf_name(name, code, nomes_de_arquivo)
+                pdf_path = OUTPUT_DIR / pdf_name
+                pdf_path.write_bytes(pdf_bytes)
 
-            row = {
-                "codigo_unico": code,
-                "nome": name,
-                "evento": event_name,
-                "tipo_certificado": cert_type,
-                "carga_horaria": workload,
-                "data_evento": event_date,
-                "data_emissao": generated_at,
-                "cidade": city,
-                "status": "valido",
-                "arquivo_pdf": str(pdf_path),
-                "criado_em": generated_at,
-                "atualizado_em": generated_at,
-                "local": location,
-                "url_validacao": validation_url,
-                "hash_pdf_sha256": pdf_hash,
-            }
-            insert_certificate(row)
-            registry_rows.append(row)
+                email = email_lookup.get(name.strip().lower(), "")
+                email_status = EMAIL_STATUS_SEM_EMAIL if not email else EMAIL_STATUS_NAO_ENVIADO
 
-            zf.writestr(pdf_name, pdf_bytes)
-            single = fitz.open(stream=pdf_bytes, filetype="pdf")
-            merged.insert_pdf(single)
-            single.close()
+                row = {
+                    "codigo_unico": code,
+                    "nome": name,
+                    "evento": event_name,
+                    "tipo_certificado": cert_type,
+                    "carga_horaria": workload,
+                    "data_evento": event_date,
+                    "data_emissao": generated_at,
+                    "cidade": city,
+                    "status": "valido",
+                    "arquivo_pdf": str(pdf_path),
+                    "criado_em": generated_at,
+                    "atualizado_em": generated_at,
+                    "local": location,
+                    "url_validacao": validation_url,
+                    "hash_pdf_sha256": pdf_hash,
+                    "email": email,
+                    "email_status": email_status,
+                    "email_erro": None,
+                }
+                insert_certificate(row)
+
+                # A partir daqui o certificado ja esta salvo: nenhuma falha de e-mail
+                # pode impedir a entrega do PDF, do registro ou do ZIP.
+                if not email:
+                    resumo["sem_email"] += 1
+                elif enviar_emails:
+                    ok, erro = enviador.enviar(
+                        destino=email,
+                        nome=name,
+                        codigo=code,
+                        pdf_bytes=pdf_bytes,
+                        url_validacao=validation_url,
+                        evento=event_name,
+                        nome_arquivo=pdf_name,
+                    )
+                    row["email_status"] = EMAIL_STATUS_ENVIADO if ok else EMAIL_STATUS_FALHOU
+                    row["email_erro"] = None if ok else erro
+                    try:
+                        update_certificate_email(code, email, row["email_status"], row["email_erro"])
+                    except sqlite3.Error as exc:
+                        # O certificado ja esta emitido. Um banco travado nao pode
+                        # derrubar a geracao so por causa do status do e-mail.
+                        resumo["erros"].append(f"{name}: status de e-mail nao gravado ({exc})")
+                    if ok:
+                        resumo["enviados"] += 1
+                    else:
+                        resumo["falhas"] += 1
+                        resumo["erros"].append(f"{name} <{email}>: {erro}")
+
+                registry_rows.append(row)
+
+                zf.writestr(pdf_name, pdf_bytes)
+                single = fitz.open(stream=pdf_bytes, filetype="pdf")
+                merged.insert_pdf(single)
+                single.close()
+
+                if progress_callback:
+                    progress_callback(indice, total, name)
 
         merged_bytes = io.BytesIO()
         merged.save(merged_bytes, garbage=4, deflate=True)
@@ -359,7 +498,7 @@ def make_zip(template_bytes: bytes, names, body_text: str, replace_body: bool, p
         zf.writestr("LEIA-ME-validacao.txt", make_validation_readme().encode("utf-8"))
 
     zip_buffer.seek(0)
-    return zip_buffer.getvalue(), registry_rows
+    return zip_buffer.getvalue(), registry_rows, resumo
 
 
 def make_validation_readme() -> str:
@@ -498,6 +637,11 @@ def render_generate_tab():
     left, right = st.columns([1.1, 0.9])
     with left:
         uploaded_template = st.file_uploader("Modelo do certificado em PDF", type=["pdf"])
+        planilha = st.file_uploader(
+            "Planilha de participantes (opcional, com nome e e-mail)",
+            type=["csv", "xlsx"],
+            help="Colunas aceitas: nome e email. Se enviada, ela substitui a lista de nomes abaixo.",
+        )
         names_raw = st.text_area(
             "Lista de nomes",
             height=180,
@@ -529,9 +673,59 @@ def render_generate_tab():
         city = st.text_input("Cidade", value=DEFAULT_CITY)
         st.info("O QR Code usa a URL fixa do projeto e adiciona automaticamente o código único.")
 
-    names = split_names(names_raw)
-    if names:
-        st.info(f"{len(names)} nome(s) identificado(s).")
+    destinatarios = {}
+    planilha_com_erro = False
+    if planilha is not None:
+        try:
+            destinatarios = parse_planilha_destinatarios(planilha)
+        except ValueError as exc:
+            st.error(str(exc))
+            planilha_com_erro = True
+
+    # Planilha ilegivel nao pode cair calado na lista de nomes do textarea:
+    # o operador acharia que os e-mails sairam.
+    if planilha_com_erro:
+        st.warning("Corrija a planilha e envie novamente. A geração está bloqueada até lá.")
+        return
+
+    if destinatarios:
+        names = list(destinatarios)
+        preview = pd.DataFrame(
+            [
+                {
+                    "nome": nome,
+                    "email": email or "(sem e-mail)",
+                    "situação": "ok" if email_valido(email) else ("sem e-mail" if not email else "e-mail inválido"),
+                }
+                for nome, email in destinatarios.items()
+            ]
+        )
+        validos = int((preview["situação"] == "ok").sum())
+        st.info(f"{len(names)} nome(s) na planilha — {validos} com e-mail válido.")
+        with st.expander("Conferir nomes e e-mails da planilha"):
+            st.dataframe(preview, use_container_width=True, hide_index=True)
+    else:
+        names = split_names(names_raw)
+        if names:
+            st.info(f"{len(names)} nome(s) identificado(s).")
+
+    smtp_ok = smtp_configurado()
+    enviar_emails = st.checkbox(
+        "Enviar certificados por e-mail ao gerar",
+        value=smtp_ok and bool(destinatarios),
+        disabled=not smtp_ok,
+        help="Cada participante recebe o PDF em anexo e o link de validação.",
+    )
+    if not smtp_ok:
+        st.caption("Envio de e-mail desativado: defina SMTP_HOST e SMTP_USER (ou SMTP_FROM_EMAIL) no servidor.")
+    elif enviar_emails and not destinatarios:
+        st.warning("Envie a planilha com a coluna de e-mail para que o disparo aconteça.")
+
+    if st.session_state.get("ultimo_lote"):
+        st.caption(
+            "Atenção: clicar em Gerar novamente emite certificados NOVOS, com novos "
+            "códigos, e reenvia os e-mails. Para apenas rebaixar o ZIP, use o botão abaixo."
+        )
 
     if st.button("Gerar certificados com QR Code", type="primary"):
         try:
@@ -547,29 +741,161 @@ def render_generate_tab():
             elif not names:
                 st.error("Cole pelo menos um nome na lista.")
             else:
-                zip_bytes, rows = make_zip(
-                    template_bytes,
-                    names,
-                    body_text,
-                    replace_body,
-                    prefix,
-                    event_name,
-                    cert_type,
-                    event_date,
-                    workload,
-                    location,
-                    city,
-                )
-                st.success("Certificados gerados e salvos no banco com sucesso.")
-                st.download_button(
-                    "Baixar ZIP com certificados",
-                    data=zip_bytes,
-                    file_name="certificados_com_qrcode.zip",
-                    mime="application/zip",
-                )
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                barra = st.progress(0.0, text="Gerando certificados...")
+
+                def atualizar_progresso(indice, total, nome):
+                    rotulo = "Gerando e enviando" if enviar_emails else "Gerando"
+                    barra.progress(indice / total, text=f"{rotulo} {indice}/{total} — {nome}")
+
+                try:
+                    zip_bytes, rows, resumo = make_zip(
+                        template_bytes,
+                        names,
+                        body_text,
+                        replace_body,
+                        prefix,
+                        event_name,
+                        cert_type,
+                        event_date,
+                        workload,
+                        location,
+                        city,
+                        emails=destinatarios,
+                        enviar_emails=enviar_emails,
+                        progress_callback=atualizar_progresso,
+                    )
+                finally:
+                    barra.empty()
+
+                # Guardar em sessao: o resultado precisa sobreviver aos reruns do
+                # Streamlit. Se o ZIP sumisse a cada interacao, o operador clicaria
+                # em Gerar de novo e emitiria certificados e e-mails duplicados.
+                st.session_state["ultimo_lote"] = {
+                    "zip": zip_bytes,
+                    "rows": rows,
+                    "resumo": resumo,
+                    "enviou": enviar_emails,
+                }
         except Exception as exc:
             st.exception(exc)
+
+    render_ultimo_lote()
+
+
+def resend_certificate_email(code: str, email_informado: str = ""):
+    """Reenvia o certificado ja emitido. Devolve (ok, mensagem)."""
+    row = find_certificate(code)
+    if not row:
+        return False, "Código não encontrado."
+    if row["status"] != "valido":
+        return False, f"Certificado está '{row['status']}'. Só certificados válidos podem ser enviados."
+
+    cadastrado = (row.get("email") or "").strip()
+    destino = (email_informado or "").strip() or cadastrado
+    if not destino:
+        return False, "Nenhum e-mail cadastrado para este certificado. Informe um no campo ao lado."
+    if not email_valido(destino):
+        return False, "Endereço de e-mail inválido."
+
+    # Certificado ainda sem endereco: grava antes de tentar enviar, para que o
+    # que o operador digitou nao se perca se o envio falhar. Quando ja existe um
+    # endereco, ele so e substituido por um envio bem-sucedido (ver
+    # update_certificate_email) para nao destruir o que ja funcionou.
+    if not cadastrado:
+        set_certificate_email(row["codigo_unico"], destino)
+
+    caminho_pdf = Path(row["arquivo_pdf"]) if row.get("arquivo_pdf") else None
+    if not caminho_pdf or not caminho_pdf.is_file():
+        return False, "PDF do certificado não encontrado em disco. Gere o certificado novamente."
+    try:
+        pdf_bytes = caminho_pdf.read_bytes()
+    except OSError as exc:
+        return False, f"Não foi possível ler o PDF do certificado ({exc.strerror or exc})."
+
+    with EnviadorLote(ativo=True) as enviador:
+        ok, erro = enviador.enviar(
+            destino=destino,
+            nome=row["nome"],
+            codigo=row["codigo_unico"],
+            pdf_bytes=pdf_bytes,
+            url_validacao=row.get("url_validacao") or build_validation_url(row["codigo_unico"]),
+            evento=row.get("evento") or "",
+            nome_arquivo=caminho_pdf.name,
+        )
+
+    status = EMAIL_STATUS_ENVIADO if ok else EMAIL_STATUS_FALHOU
+    update_certificate_email(row["codigo_unico"], destino, status, None if ok else erro)
+    if ok:
+        return True, f"Certificado reenviado para {destino}."
+    return False, f"Falha no envio: {erro}"
+
+
+def render_resend_block():
+    st.write("Reenviar certificado por e-mail")
+    if not smtp_configurado():
+        st.info("Reenvio desativado: defina SMTP_HOST e SMTP_USER (ou SMTP_FROM_EMAIL) no servidor.")
+        return
+
+    col1, col2, col3 = st.columns([1.2, 1.2, 0.5])
+    with col1:
+        code = st.text_input("Código para reenviar", key="resend_code")
+    with col2:
+        email_informado = st.text_input(
+            "E-mail (opcional)",
+            key="resend_email",
+            placeholder="Deixe vazio para usar o cadastrado",
+        )
+    with col3:
+        st.write("")
+        st.write("")
+        if st.button("Reenviar", type="primary"):
+            ok, mensagem = resend_certificate_email(code.strip().upper(), email_informado)
+            if ok:
+                # Sem o rerun a tabela acima continua mostrando o status antigo,
+                # e o operador reenvia de novo achando que nao funcionou.
+                st.session_state["resend_feedback"] = mensagem
+                st.rerun()
+            else:
+                st.error(mensagem)
+
+    if st.session_state.get("resend_feedback"):
+        st.success(st.session_state.pop("resend_feedback"))
+
+
+def render_ultimo_lote():
+    """Mostra o resultado do ultimo lote, sobrevivendo aos reruns do Streamlit."""
+    lote = st.session_state.get("ultimo_lote")
+    if not lote:
+        return
+
+    resumo = lote["resumo"]
+    st.success("Certificados gerados e salvos no banco com sucesso.")
+    st.download_button(
+        "Baixar ZIP com certificados",
+        data=lote["zip"],
+        file_name="certificados_com_qrcode.zip",
+        mime="application/zip",
+    )
+
+    if lote["enviou"]:
+        st.write(
+            f"**Envio por e-mail:** {resumo['enviados']} enviado(s), "
+            f"{resumo['falhas']} falha(s), {resumo['sem_email']} sem e-mail."
+        )
+        if resumo["erros"]:
+            st.warning(
+                f"{resumo['falhas']} e-mail(s) não foram entregues. "
+                "Os certificados foram gerados normalmente — use o reenvio abaixo na aba "
+                "'Certificados Emitidos' depois de corrigir o problema."
+            )
+            with st.expander("Ver falhas de envio"):
+                for erro in resumo["erros"]:
+                    st.write(f"- {erro}")
+
+    st.dataframe(pd.DataFrame(lote["rows"]), use_container_width=True)
+    if st.button("Limpar resultado"):
+        del st.session_state["ultimo_lote"]
+        st.rerun()
 
 
 def render_issued_tab():
@@ -583,6 +909,8 @@ def render_issued_tab():
     visible_columns = [
         "codigo_unico",
         "nome",
+        "email",
+        "email_status",
         "evento",
         "tipo_certificado",
         "status",
@@ -591,7 +919,8 @@ def render_issued_tab():
         "cidade",
         "arquivo_pdf",
     ]
-    st.dataframe(df[visible_columns], use_container_width=True, hide_index=True)
+    colunas_presentes = [coluna for coluna in visible_columns if coluna in df.columns]
+    st.dataframe(df[colunas_presentes], use_container_width=True, hide_index=True)
 
     st.divider()
     st.write("Revogar ou cancelar certificado")
@@ -610,6 +939,9 @@ def render_issued_tab():
                 update_certificate_status(code.strip().upper(), status)
                 st.success("Status atualizado.")
                 st.rerun()
+
+    st.divider()
+    render_resend_block()
 
     st.divider()
     st.write("Excluir certificado")

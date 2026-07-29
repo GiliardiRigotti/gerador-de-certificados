@@ -63,15 +63,65 @@ O operador não digita mais a URL pública na interface. O QR Code sempre usa `V
 https://certificados.seudominio.gov.br/validar?codigo=CMS2026-A8F3K2
 ```
 
+## Envio por e-mail
+
+O envio é opcional. Sem `SMTP_HOST` definido, o sistema funciona exatamente como antes e o
+envio aparece desabilitado na interface.
+
+```bash
+SMTP_HOST=smtp.hostinger.com
+SMTP_PORT=465
+SMTP_USER=certificados@seudominio.gov.br
+SMTP_PASSWORD=sua_senha
+SMTP_FROM_EMAIL=certificados@seudominio.gov.br   # opcional, padrão: SMTP_USER
+SMTP_FROM_NAME=Conferência Municipal de Saúde    # opcional
+SMTP_USE_SSL=true                                # false usa STARTTLS; a porta acompanha
+SMTP_TIMEOUT=30                                  # opcional, segundos por conexão
+EMAIL_ASSUNTO="Seu certificado - {evento}"       # opcional, aceita {evento} e {nome}
+```
+
+`SMTP_PORT` é opcional: sem ele a porta acompanha o modo (465 com SSL, 587 com STARTTLS).
+Se o servidor ficar inacessível, o envio do lote é interrompido após 3 tentativas de conexão
+em vez de esperar o timeout para cada participante.
+
+Cada participante recebe uma mensagem individual com o certificado em PDF anexo e o link de
+validação. A lista de destinatários nunca é exposta: um e-mail por pessoa, sem cópia.
+
+### Planilha de participantes
+
+Para enviar por e-mail, suba uma planilha `.csv` ou `.xlsx` com as colunas `nome` e `email`:
+
+```csv
+nome;email
+Maria da Silva;maria@exemplo.com
+João Pereira;joao@exemplo.com
+Ana Souza;
+```
+
+O cabeçalho tolera variações (`Nome`, `E-mail`, `NOME`, `Participante`). Vírgula e ponto e
+vírgula funcionam como separador. Nomes repetidos geram um único certificado. Linha sem
+e-mail gera o certificado normalmente, apenas sem envio.
+
+Falha de e-mail **nunca** impede a emissão: o PDF, o registro no banco e o ZIP são entregues
+mesmo com o servidor SMTP fora do ar. Cada certificado guarda seu `email_status`:
+
+| Status | Significado |
+|---|---|
+| `sem_email` | Nenhum e-mail informado para o participante |
+| `nao_enviado` | E-mail cadastrado, mas o envio não foi solicitado na geração |
+| `enviado` | Entregue ao servidor SMTP |
+| `falhou` | Erro no envio — use o reenvio na aba Certificados Emitidos |
+
 ## Como gerar certificados
 
 1. Entre no login administrativo.
 2. Abra a aba **Gerar certificados**.
 3. Envie o modelo PDF ou use `modelo_certificado.pdf`.
-4. Cole os nomes, um por linha.
+4. Cole os nomes um por linha **ou** envie a planilha com nome e e-mail.
 5. Configure dados do evento, carga horária, data, local e cidade.
-6. Clique em **Gerar certificados com QR Code**.
-7. Baixe o ZIP com os PDFs.
+6. Marque **Enviar certificados por e-mail ao gerar** se quiser o disparo automático.
+7. Clique em **Gerar certificados com QR Code**.
+8. Baixe o ZIP com os PDFs e confira o resumo do envio.
 
 Cada certificado é salvo no banco SQLite e o PDF também é gravado na pasta definida por `OUTPUT_DIR`.
 
@@ -92,16 +142,32 @@ O banco é criado automaticamente em `certificados.db`. A tabela `certificados` 
 - `arquivo_pdf`
 - `criado_em`
 - `atualizado_em`
+- `email`
+- `email_status`
+- `email_enviado_em`
+- `email_erro`
 
 Os status aceitos são `valido`, `cancelado` e `revogado`.
+
+As colunas de e-mail são adicionadas automaticamente em bancos já existentes, sem perda de
+dados — a migração roda no start e é idempotente.
 
 ## Certificados Emitidos
 
 Na área administrativa existe a aba **Certificados Emitidos**, com:
 
 - busca por nome ou código;
-- listagem dos certificados salvos;
-- alteração de status para revogar, cancelar ou revalidar certificado.
+- listagem dos certificados salvos, incluindo e-mail e status de envio;
+- alteração de status para revogar, cancelar ou revalidar certificado;
+- reenvio do certificado por e-mail, com opção de corrigir o endereço. Só certificados
+  `valido` podem ser reenviados.
+
+## Testes
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
 
 ## Validação pública
 
