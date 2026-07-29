@@ -87,6 +87,30 @@ em vez de esperar o timeout para cada participante.
 Cada participante recebe uma mensagem individual com o certificado em PDF anexo e o link de
 validação. A lista de destinatários nunca é exposta: um e-mail por pessoa, sem cópia.
 
+### Testar a configuração antes de disparar
+
+Antes de gerar um lote real, confirme que o SMTP funciona:
+
+```bash
+python testar_smtp.py                          # só conecta e autentica
+python testar_smtp.py --enviar voce@dominio.com  # envia uma mensagem de teste
+```
+
+No container:
+
+```bash
+docker exec -it certificados python testar_smtp.py
+```
+
+Ele testa DNS, porta, TLS e login separadamente, e explica o que fazer em cada falha.
+Sem `--enviar`, nenhuma mensagem sai.
+
+**Contas Google (Gmail / Workspace):** a senha da caixa **não funciona** para envio — o
+Google desativou autenticação básica em 2022. É preciso uma **Senha de App** de 16
+caracteres (exige verificação em duas etapas na conta) ou o **SMTP relay**
+(`smtp-relay.gmail.com`) autorizado por IP pelo administrador do domínio. Limite típico:
+500 destinatários por dia em conta comum, 2.000 em licenças pagas superiores.
+
 ### Planilha de participantes
 
 Para enviar por e-mail, suba uma planilha `.csv` ou `.xlsx` com as colunas `nome` e `email`:
