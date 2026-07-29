@@ -208,11 +208,11 @@ def montar_mensagem(destino: str, nome: str, codigo: str, pdf_bytes: bytes, url_
 
     corpo_evento = f" da {evento}" if evento else ""
     texto = (
-        f"Ola, {nome}!\n\n"
+        f"Olá, {nome}!\n\n"
         f"Segue em anexo o seu certificado{corpo_evento}.\n\n"
-        f"Codigo de autenticacao: {codigo}\n"
+        f"Código de autenticação: {codigo}\n"
         f"Valide a autenticidade em: {url_validacao}\n\n"
-        "Esta e uma mensagem automatica. Guarde este e-mail para consultas futuras.\n"
+        "Esta é uma mensagem automática. Guarde este e-mail para consultas futuras.\n"
     )
     msg.set_content(texto)
     # Nome e evento vem de planilha enviada pelo operador: escapar antes de virar HTML.
@@ -222,11 +222,11 @@ def montar_mensagem(destino: str, nome: str, codigo: str, pdf_bytes: bytes, url_
     evento_html = html.escape(corpo_evento)
     msg.add_alternative(
         f"""<html><body style="font-family:Arial,Helvetica,sans-serif;color:#243b53;">
-<p>Ola, <strong>{nome_html}</strong>!</p>
+<p>Olá, <strong>{nome_html}</strong>!</p>
 <p>Segue em anexo o seu certificado{evento_html}.</p>
-<p>Codigo de autenticacao: <strong>{codigo_html}</strong><br>
+<p>Código de autenticação: <strong>{codigo_html}</strong><br>
 Valide a autenticidade em: <a href="{url_html}">{url_html}</a></p>
-<p style="color:#52616f;font-size:0.9em;">Esta e uma mensagem automatica.
+<p style="color:#52616f;font-size:0.9em;">Esta é uma mensagem automática.
 Guarde este e-mail para consultas futuras.</p>
 </body></html>""",
         subtype="html",
