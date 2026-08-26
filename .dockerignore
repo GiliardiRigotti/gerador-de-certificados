@@ -1,0 +1,11 @@
+.venv
+.venv_mac
+__pycache__
+*.pyc
+tmp
+certificados_gerados
+certificados.db
+certificados_emitidos.csv
+.git
+.mcp.json
+README.md
