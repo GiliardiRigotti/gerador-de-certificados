@@ -1,5 +1,7 @@
 import hashlib
 import io
+import logging
+import os
 import re
 import secrets
 import sqlite3
@@ -36,6 +38,37 @@ st.set_page_config(page_title="Certificados com QR Code", page_icon="✅", layou
 
 APP_DIR = Path(__file__).parent
 DEFAULT_TEMPLATE = APP_DIR / "modelo_certificado.pdf"
+
+# Log dedicado para diagnostico do login administrativo. Grava em arquivo na
+# raiz do projeto e nao propaga para o root logger (evita poluir o stdout do
+# Streamlit). Nao registra a senha em texto puro: apenas tamanho, um prefixo de
+# hash e sinais de espacos/quebras de linha acidentais.
+LOGIN_LOG_PATH = Path(os.getenv("LOGIN_LOG_PATH", APP_DIR / "login_debug.log"))
+login_logger = logging.getLogger("certificados.login")
+if not login_logger.handlers:
+    login_logger.setLevel(logging.DEBUG)
+    try:
+        _login_handler = logging.FileHandler(LOGIN_LOG_PATH, encoding="utf-8")
+    except OSError:
+        _login_handler = logging.StreamHandler()
+    _login_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    )
+    login_logger.addHandler(_login_handler)
+    login_logger.propagate = False
+    login_logger.info(
+        "config carregada | ADMIN_USERNAME=%r | senha_configurada=%s | "
+        "usa_sha256=%s | usa_plaintext=%s | ADMIN_PASSWORD_no_os_environ=%s | "
+        "ADMIN_PASSWORD_SHA256_no_os_environ=%s | .env=%s (existe=%s)",
+        ADMIN_USERNAME,
+        bool(ADMIN_PASSWORD_SHA256 or ADMIN_PASSWORD),
+        bool(ADMIN_PASSWORD_SHA256),
+        bool(ADMIN_PASSWORD),
+        "ADMIN_PASSWORD" in os.environ,
+        "ADMIN_PASSWORD_SHA256" in os.environ,
+        str(APP_DIR / ".env"),
+        (APP_DIR / ".env").exists(),
+    )
 
 DEFAULT_EVENT_NAME = EVENTO_PADRAO
 DEFAULT_EVENT_DATE = "26 e 27 de junho de 2026"
@@ -521,6 +554,41 @@ def admin_password_configurada() -> bool:
     return bool(ADMIN_PASSWORD_SHA256 or ADMIN_PASSWORD)
 
 
+def _fingerprint(value: str) -> str:
+    """Prefixo do SHA-256: compara valores no log sem expor o texto puro."""
+    if value is None:
+        return "<none>"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def log_login_attempt(username: str, password: str, sucesso: bool) -> None:
+    if ADMIN_PASSWORD_SHA256:
+        metodo = "sha256"
+        senha_esperada_fp = ADMIN_PASSWORD_SHA256[:12]
+    elif ADMIN_PASSWORD:
+        metodo = "plaintext"
+        senha_esperada_fp = _fingerprint(ADMIN_PASSWORD)
+    else:
+        metodo = "nenhum"
+        senha_esperada_fp = "<none>"
+    login_logger.debug(
+        "login | resultado=%s | "
+        "user_recebido=%r len=%d | user_esperado=%r len=%d | user_match=%s | "
+        "senha_configurada=%s metodo=%s | "
+        "ADMIN_PASSWORD_no_os_environ=%s ADMIN_PASSWORD_SHA256_no_os_environ=%s | "
+        "senha_recebida len=%d fp=%s | senha_esperada fp=%s | "
+        "senha_tem_espaco_nas_pontas=%s | senha_match=%s",
+        "OK" if sucesso else "FALHOU",
+        username, len(username), ADMIN_USERNAME, len(ADMIN_USERNAME),
+        username == ADMIN_USERNAME,
+        admin_password_configurada(), metodo,
+        "ADMIN_PASSWORD" in os.environ, "ADMIN_PASSWORD_SHA256" in os.environ,
+        len(password), _fingerprint(password), senha_esperada_fp,
+        password != password.strip(),
+        check_password(password),
+    )
+
+
 def check_password(password: str) -> bool:
     if not admin_password_configurada():
         return False
@@ -611,7 +679,9 @@ def render_login():
             "(ou ADMIN_PASSWORD_SHA256) no .env ou no ambiente do servidor."
         )
     if submitted:
-        if secrets.compare_digest(username, ADMIN_USERNAME) and check_password(password):
+        ok = secrets.compare_digest(username, ADMIN_USERNAME) and check_password(password)
+        log_login_attempt(username, password, ok)
+        if ok:
             st.session_state["admin_authenticated"] = True
             st.rerun()
         else:

@@ -9,6 +9,7 @@ tmp/
 
 .env
 .streamlit/secrets.toml
+login_debug.log
 
 # Credenciais de MCP (contem token de API)
 .mcp.json
