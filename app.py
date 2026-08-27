@@ -512,7 +512,13 @@ ou configure a variável de ambiente VALIDATION_BASE_URL no servidor oficial.
 """
 
 
+def admin_password_configurada() -> bool:
+    return bool(ADMIN_PASSWORD_SHA256 or ADMIN_PASSWORD)
+
+
 def check_password(password: str) -> bool:
+    if not admin_password_configurada():
+        return False
     if ADMIN_PASSWORD_SHA256:
         digest = hashlib.sha256(password.encode("utf-8")).hexdigest()
         return secrets.compare_digest(digest, ADMIN_PASSWORD_SHA256)
@@ -594,6 +600,11 @@ def render_login():
         username = st.text_input("Usuário", placeholder="Digite seu usuário")
         password = st.text_input("Senha", type="password")
         submitted = st.form_submit_button("Entrar", type="primary")
+    if not admin_password_configurada():
+        st.error(
+            "Nenhuma senha administrativa configurada. Defina ADMIN_PASSWORD "
+            "(ou ADMIN_PASSWORD_SHA256) no .env ou no ambiente do servidor."
+        )
     if submitted:
         if secrets.compare_digest(username, ADMIN_USERNAME) and check_password(password):
             st.session_state["admin_authenticated"] = True

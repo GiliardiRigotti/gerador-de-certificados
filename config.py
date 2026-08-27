@@ -24,7 +24,10 @@ EVENTO_PADRAO = os.getenv(
 )
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+# Sem padrao: um fallback conhecido vira senha de producao no primeiro deploy
+# que esquecer a variavel. Sem ADMIN_PASSWORD nem ADMIN_PASSWORD_SHA256 o
+# login e recusado e a tela orienta a configuracao.
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_PASSWORD_SHA256 = os.getenv("ADMIN_PASSWORD_SHA256", "")
 
 
