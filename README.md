@@ -33,14 +33,38 @@ ADMIN_USERNAME=seu_usuario
 ADMIN_PASSWORD=sua_senha_forte
 ```
 
-Sem essas variáveis o app cai nas credenciais de desenvolvimento definidas em
-`config.py`, que servem apenas para uso local e não devem ir para produção.
+**Não há senha padrão.** Sem `ADMIN_PASSWORD` (ou `ADMIN_PASSWORD_SHA256`) o
+login é recusado e a tela mostra:
 
-Também é possível usar hash SHA-256 da senha:
+> Nenhuma senha administrativa configurada. Defina ADMIN_PASSWORD (ou ADMIN_PASSWORD_SHA256) no .env ou no ambiente do servidor.
+
+Também é possível usar o hash SHA-256 da senha em vez do texto puro (tem
+precedência sobre `ADMIN_PASSWORD`):
 
 ```bash
-ADMIN_PASSWORD_SHA256=hash_da_senha
+ADMIN_PASSWORD_SHA256=$(python -c "import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())" 'sua_senha_forte')
 ```
+
+### Onde configurar em cada ambiente
+
+| Ambiente | Como definir |
+| --- | --- |
+| Local | Colocar `ADMIN_USERNAME` / `ADMIN_PASSWORD` no `.env` (carregado na inicialização). |
+| `docker run` | `-e ADMIN_USERNAME=admin -e ADMIN_PASSWORD=...` no comando (recriar o container). |
+| docker-compose | Bloco `environment:` do serviço + `docker compose up -d --force-recreate`. |
+| Painel de hospedagem | Seção de variáveis de ambiente do app + reiniciar. |
+
+O `.env` **não** vai para produção: está no `.gitignore` e no `.dockerignore`,
+portanto nunca entra na imagem nem no repositório. Em produção as variáveis vêm
+sempre do ambiente do servidor.
+
+### Diagnóstico de login
+
+O app grava `login_debug.log` (na raiz do projeto; path configurável por
+`LOGIN_LOG_PATH`, ignorado pelo git). No start registra se a senha está
+configurada e se veio do `os.environ` ou do `.env`; a cada tentativa registra o
+match de usuário e o fingerprint SHA-256 da senha recebida vs esperada — sem
+gravar a senha em texto puro.
 
 ## Configuração
 
@@ -223,8 +247,31 @@ Para publicar oficialmente:
 2. Aponte o domínio `https://certificados.bc.sc.gov.br` para o app. O Streamlit responde na raiz,
    então o QR Code usa `https://certificados.bc.sc.gov.br/?codigo=CODIGO`.
 3. Defina `VALIDATION_BASE_URL` no ambiente do servidor antes de gerar certificados oficiais.
-4. Defina credenciais administrativas fortes.
+4. Defina `ADMIN_USERNAME` e `ADMIN_PASSWORD` (ou `ADMIN_PASSWORD_SHA256`) no ambiente do
+   servidor. Sem isso o login é recusado — ver a seção **Login administrativo**.
 5. Mantenha o arquivo SQLite com backup regular ou migre futuramente para PostgreSQL/Supabase usando a mesma estrutura de dados.
+
+### Exemplo com Docker
+
+A imagem é construída pelo `Dockerfile` do repositório. As variáveis de ambiente
+são passadas na execução (o `.env` não entra na imagem):
+
+```bash
+docker build -t certificados .
+
+docker run -d --name certificados \
+  -e ADMIN_USERNAME=admin \
+  -e ADMIN_PASSWORD=sua_senha_forte \
+  -e VALIDATION_BASE_URL=https://certificados.bc.sc.gov.br/ \
+  -e SMTP_HOST=smtp.hostinger.com \
+  -e SMTP_USER=... -e SMTP_PASSWORD=... \
+  -v /srv/certificados/data:/data \
+  -p 8501:8501 \
+  certificados
+```
+
+Para trocar credenciais depois, recrie o container (`docker rm -f certificados`
+e rode de novo com os novos `-e`). `docker run -e` não altera container existente.
 
 ## Ajuste de layout
 
