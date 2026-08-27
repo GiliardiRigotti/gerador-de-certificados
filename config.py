@@ -1,8 +1,15 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 APP_DIR = Path(__file__).parent
+
+# Carrega o .env da raiz do projeto, se existir. Variaveis ja presentes no
+# ambiente tem precedencia: em producao o servidor (ou o docker run -e) manda,
+# e o arquivo serve so para a maquina do desenvolvedor.
+load_dotenv(APP_DIR / ".env")
 
 VALIDATION_BASE_URL = os.getenv(
     "VALIDATION_BASE_URL",

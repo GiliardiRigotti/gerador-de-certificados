@@ -9,3 +9,4 @@ certificados_emitidos.csv
 .git
 .mcp.json
 README.md
+.env

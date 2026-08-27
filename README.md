@@ -44,7 +44,17 @@ ADMIN_PASSWORD_SHA256=hash_da_senha
 
 ## Configuração
 
-As configurações principais ficam em `config.py`:
+Toda a configuração é feita por variáveis de ambiente. Copie o modelo e ajuste os valores:
+
+```bash
+cp .env.example .env
+```
+
+O `.env` é carregado automaticamente na inicialização e está no `.gitignore` — nunca o commite.
+Variáveis já definidas no ambiente têm precedência sobre o arquivo, então em produção o
+servidor (ou o `docker run -e`) continua no comando.
+
+Os padrões, usados quando a variável não é informada, ficam em `config.py`:
 
 ```python
 VALIDATION_BASE_URL = "https://certificados.seudominio.gov.br/validar"
