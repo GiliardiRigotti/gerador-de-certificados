@@ -600,7 +600,6 @@ def render_login():
             st.rerun()
         else:
             st.error("Usuário ou senha inválidos.")
-    st.info("Credenciais padrão para primeiro acesso: usuário admin e senha admin123. Altere no servidor por variáveis de ambiente.")
 
 
 def render_public_validation(code: str = ""):
