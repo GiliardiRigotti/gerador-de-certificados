@@ -26,19 +26,15 @@ streamlit run app.py
 
 A tela inicial é o login administrativo do organizador.
 
-Credenciais padrão para primeiro acesso:
-
-```text
-Usuário: admin
-Senha: admin123
-```
-
-Em produção, altere por variáveis de ambiente:
+Defina as credenciais por variáveis de ambiente antes do primeiro acesso:
 
 ```bash
 ADMIN_USERNAME=seu_usuario
 ADMIN_PASSWORD=sua_senha_forte
 ```
+
+Sem essas variáveis o app cai nas credenciais de desenvolvimento definidas em
+`config.py`, que servem apenas para uso local e não devem ir para produção.
 
 Também é possível usar hash SHA-256 da senha:
 
