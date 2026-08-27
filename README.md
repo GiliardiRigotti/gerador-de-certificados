@@ -57,7 +57,7 @@ servidor (ou o `docker run -e`) continua no comando.
 Os padrões, usados quando a variável não é informada, ficam em `config.py`:
 
 ```python
-VALIDATION_BASE_URL = "https://certificados.seudominio.gov.br/validar"
+VALIDATION_BASE_URL = "https://certificados.bc.sc.gov.br/"
 DATABASE_PATH = "certificados.db"
 OUTPUT_DIR = "certificados_gerados"
 EVENTO_PADRAO = "Nome do evento"
@@ -66,7 +66,7 @@ EVENTO_PADRAO = "Nome do evento"
 O operador não digita mais a URL pública na interface. O QR Code sempre usa `VALIDATION_BASE_URL` e adiciona o código automaticamente:
 
 ```text
-https://certificados.seudominio.gov.br/validar?codigo=CMS2026-A8F3K2
+https://certificados.bc.sc.gov.br/?codigo=CMS2026-A8F3K2
 ```
 
 ## Envio por e-mail
@@ -77,9 +77,9 @@ envio aparece desabilitado na interface.
 ```bash
 SMTP_HOST=smtp.hostinger.com
 SMTP_PORT=465
-SMTP_USER=certificados@seudominio.gov.br
+SMTP_USER=certificados@bc.sc.gov.br
 SMTP_PASSWORD=sua_senha
-SMTP_FROM_EMAIL=certificados@seudominio.gov.br   # opcional, padrão: SMTP_USER
+SMTP_FROM_EMAIL=certificados@bc.sc.gov.br   # opcional, padrão: SMTP_USER
 SMTP_FROM_NAME=Conferência Municipal de Saúde    # opcional
 SMTP_USE_SSL=true                                # false usa STARTTLS; a porta acompanha
 SMTP_TIMEOUT=30                                  # opcional, segundos por conexão
@@ -220,7 +220,8 @@ Ela não exibe tabela, CSV, banco de dados nem funções administrativas.
 Para publicar oficialmente:
 
 1. Hospede o Streamlit em um servidor da instituição ou serviço como Render, Railway, VM ou container.
-2. Configure um domínio público, por exemplo `https://certificados.seudominio.gov.br/validar`.
+2. Aponte o domínio `https://certificados.bc.sc.gov.br` para o app. O Streamlit responde na raiz,
+   então o QR Code usa `https://certificados.bc.sc.gov.br/?codigo=CODIGO`.
 3. Defina `VALIDATION_BASE_URL` no ambiente do servidor antes de gerar certificados oficiais.
 4. Defina credenciais administrativas fortes.
 5. Mantenha o arquivo SQLite com backup regular ou migre futuramente para PostgreSQL/Supabase usando a mesma estrutura de dados.

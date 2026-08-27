@@ -7,7 +7,7 @@ import string
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import fitz  # PyMuPDF
 import pandas as pd
@@ -317,8 +317,13 @@ def split_names(raw: str):
 
 
 def normalize_base_url(url: str) -> str:
-    url = (url or "").strip() or "http://localhost:8501/validar"
-    return url.rstrip("/")
+    url = (url or "").strip() or "http://localhost:8501/"
+    url = url.rstrip("/")
+    # Sem path o resultado sairia como "https://host?codigo=", que e valido mas
+    # depende do cliente normalizar. Em QR Code impresso nao ha segunda chance.
+    if not urlparse(url).path:
+        url += "/"
+    return url
 
 
 def make_code(prefix: str = "CMS2026") -> str:

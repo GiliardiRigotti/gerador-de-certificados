@@ -13,7 +13,7 @@ load_dotenv(APP_DIR / ".env")
 
 VALIDATION_BASE_URL = os.getenv(
     "VALIDATION_BASE_URL",
-    "https://certificados.seudominio.gov.br/validar",
+    "https://certificados.bc.sc.gov.br/",
 )
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", APP_DIR / "certificados.db"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", APP_DIR / "certificados_gerados"))
