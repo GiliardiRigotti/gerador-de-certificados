@@ -5,7 +5,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py config.py email_sender.py testar_smtp.py modelo_certificado.pdf ./
+COPY app.py config.py email_sender.py perfil_certificado.py testar_smtp.py modelo_certificado.pdf ./
+COPY perfis/ ./perfis/
+COPY modelos/ ./modelos/
 
 ENV DATABASE_PATH=/data/certificados.db \
     OUTPUT_DIR=/data/certificados_gerados
