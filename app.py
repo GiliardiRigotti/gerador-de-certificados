@@ -16,9 +16,12 @@ import pandas as pd
 import qrcode
 import streamlit as st
 
+import perfil_certificado
+
 from email_sender import (
     EnviadorLote,
     email_valido,
+    parse_planilha,
     parse_planilha_destinatarios,
     smtp_configurado,
 )
@@ -108,6 +111,17 @@ EMAIL_COLUMNS = {
     "email_erro": "TEXT",
 }
 
+# Campos preenchidos pelos perfis de certificado (CPF/tema/horas da palestra) e o
+# id do perfil usado. Tambem aditivos e idempotentes.
+PERFIL_COLUMNS = {
+    "cpf": "TEXT",
+    "tema": "TEXT",
+    "horas": "TEXT",
+    "perfil": "TEXT",
+}
+
+COLUNAS_ADITIVAS = {**EMAIL_COLUMNS, **PERFIL_COLUMNS}
+
 EMAIL_STATUS_SEM_EMAIL = "sem_email"
 EMAIL_STATUS_NAO_ENVIADO = "nao_enviado"
 EMAIL_STATUS_ENVIADO = "enviado"
@@ -145,12 +159,16 @@ def init_db():
                 email TEXT,
                 email_status TEXT NOT NULL DEFAULT 'sem_email',
                 email_enviado_em TEXT,
-                email_erro TEXT
+                email_erro TEXT,
+                cpf TEXT,
+                tema TEXT,
+                horas TEXT,
+                perfil TEXT
             )
             """
         )
         existentes = {row["name"] for row in conn.execute("PRAGMA table_info(certificados)")}
-        for coluna, ddl in EMAIL_COLUMNS.items():
+        for coluna, ddl in COLUNAS_ADITIVAS.items():
             if coluna not in existentes:
                 conn.execute(f"ALTER TABLE certificados ADD COLUMN {coluna} {ddl}")
         conn.commit()
@@ -184,6 +202,10 @@ def insert_certificate(row: dict):
         "hash_pdf_sha256",
         "email",
         "email_status",
+        "cpf",
+        "tema",
+        "horas",
+        "perfil",
     ]
     placeholders = ", ".join(["?"] * len(fields))
     with get_connection() as conn:
@@ -349,6 +371,49 @@ def split_names(raw: str):
     return result
 
 
+# Partículas que ficam em minúsculo no meio de um nome (nunca no início).
+PARTICULAS_NOME = {
+    "da", "de", "do", "das", "dos", "e", "di", "du", "del", "della",
+    "la", "le", "van", "von", "y",
+}
+
+
+def _titlecase_palavra(palavra: str) -> str:
+    """'JOSÉ' -> 'José', 'ana-beatriz' -> 'Ana-Beatriz', "d'ávila" -> "D'Ávila"."""
+    for sep in ("-", "'", "’"):
+        if sep in palavra:
+            return sep.join(_titlecase_palavra(p) for p in palavra.split(sep))
+    return palavra[:1].upper() + palavra[1:].lower() if palavra else palavra
+
+
+def normalizar_nome_proprio(nome: str) -> str:
+    """Conserta a caixa de nomes bagunçados sem tocar nos que já estão certos.
+
+    'VERA SUSANA La Falc'      -> 'Vera Susana La Falc'
+    'William Xavier Oliveira'  -> 'William Xavier Oliveira'  (inalterado)
+    'maria da silva'           -> 'Maria da Silva'
+
+    Cada palavra só é ajustada quando está TODA em maiúsculas ou TODA em
+    minúsculas; palavras com caixa mista ('La', 'McCarthy') são preservadas.
+    Partículas (da, de, von...) ficam minúsculas, exceto no início do nome.
+    """
+    nome = " ".join((nome or "").split())
+    if not nome:
+        return nome
+
+    palavras = nome.split(" ")
+    resultado = []
+    for i, palavra in enumerate(palavras):
+        so_letras = re.sub(r"[-'’]", "", palavra)
+        if so_letras and not (so_letras.isupper() or so_letras.islower()):
+            resultado.append(palavra)  # caixa mista: já veio ajustado
+        elif i > 0 and palavra.lower() in PARTICULAS_NOME:
+            resultado.append(palavra.lower())
+        else:
+            resultado.append(_titlecase_palavra(palavra))
+    return " ".join(resultado)
+
+
 def normalize_base_url(url: str) -> str:
     url = (url or "").strip() or "http://localhost:8501/"
     url = url.rstrip("/")
@@ -442,14 +507,46 @@ def dataframe_to_csv_bytes(df: pd.DataFrame):
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
-def make_zip(template_bytes: bytes, names, body_text: str, replace_body: bool, prefix: str, event_name: str, cert_type: str, event_date: str, workload: str, location: str, city: str, emails: dict = None, enviar_emails: bool = False, progress_callback=None):
+def certificado_legado(template_bytes, body_text, replace_body):
+    """render_fn para o modelo atual da 9ª Conferência (upload + parágrafo)."""
+
+    def _render(name, _dados, code, validation_url):
+        return make_certificate(
+            template_bytes, name, body_text, replace_body, code, validation_url, show_qr=True
+        )
+
+    return _render
+
+
+def certificado_por_perfil(perfil):
+    """render_fn que desenha a partir de um perfil JSON e dos dados do participante."""
+
+    def _render(name, dados, code, validation_url):
+        return perfil_certificado.renderizar(
+            perfil,
+            {
+                "nome": name,
+                "cpf": dados.get("cpf", ""),
+                "tema": dados.get("tema", ""),
+                "horas": dados.get("horas", ""),
+            },
+            code,
+            validation_url,
+        )
+
+    return _render
+
+
+def make_zip(names, participantes, render_fn, prefix: str, event_name: str, cert_type: str, event_date: str, workload: str, location: str, city: str, perfil_id: str = "", enviar_emails: bool = False, progress_callback=None):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     zip_buffer = io.BytesIO()
     merged = fitz.open()
     registry_rows = []
     generated_at = datetime.now().isoformat(timespec="seconds")
 
-    email_lookup = {str(k).strip().lower(): (v or "").strip() for k, v in (emails or {}).items()}
+    dados_lookup = {
+        str(k).strip().lower(): (v or {}) for k, v in (participantes or {}).items()
+    }
     resumo = {"enviados": 0, "falhas": 0, "sem_email": 0, "erros": []}
     total = len(names)
     nomes_de_arquivo = set()
@@ -459,13 +556,14 @@ def make_zip(template_bytes: bytes, names, body_text: str, replace_body: bool, p
             for indice, name in enumerate(names, start=1):
                 code = make_code(prefix)
                 validation_url = build_validation_url(code)
-                pdf_bytes = make_certificate(template_bytes, name, body_text, replace_body, code, validation_url, show_qr=True)
+                dados = dados_lookup.get(name.strip().lower(), {})
+                pdf_bytes = render_fn(name, dados, code, validation_url)
                 pdf_hash = hashlib.sha256(pdf_bytes).hexdigest()
                 pdf_name = unique_pdf_name(name, code, nomes_de_arquivo)
                 pdf_path = OUTPUT_DIR / pdf_name
                 pdf_path.write_bytes(pdf_bytes)
 
-                email = email_lookup.get(name.strip().lower(), "")
+                email = (dados.get("email") or "").strip()
                 email_status = EMAIL_STATUS_SEM_EMAIL if not email else EMAIL_STATUS_NAO_ENVIADO
 
                 row = {
@@ -487,6 +585,10 @@ def make_zip(template_bytes: bytes, names, body_text: str, replace_body: bool, p
                     "email": email,
                     "email_status": email_status,
                     "email_erro": None,
+                    "cpf": (dados.get("cpf") or "").strip(),
+                    "tema": (dados.get("tema") or "").strip(),
+                    "horas": (dados.get("horas") or "").strip(),
+                    "perfil": perfil_id,
                 }
                 insert_certificate(row)
 
@@ -688,6 +790,21 @@ def render_login():
             st.error("Usuário ou senha inválidos.")
 
 
+def campos_publicos_extra(row: dict) -> list:
+    """Pares (rótulo, valor) extras exibidos na consulta pública de palestrante.
+
+    CPF nunca entra aqui: dado pessoal não aparece em página pública.
+    """
+    extra = []
+    tema = (row.get("tema") or "").strip()
+    horas = (row.get("horas") or "").strip()
+    if tema:
+        extra.append(("Tema da palestra", tema))
+    if horas:
+        extra.append(("Carga horária da palestra", horas))
+    return extra
+
+
 def render_public_validation(code: str = ""):
     st.title("Validação de certificado")
     st.caption("Consulta pública de autenticidade.")
@@ -717,8 +834,91 @@ def render_public_validation(code: str = ""):
             st.write("**Cidade:**", row["cidade"])
             st.write("**Código de autenticação:**", row["codigo_unico"])
 
+        for rotulo, valor in campos_publicos_extra(row):
+            st.write(f"**{rotulo}:**", valor)
+
+
+LEGADO_ID = "__legado__"
+LEGADO_ROTULO = "9ª Conferência de Saúde (modelo atual)"
+
+
+def _checkbox_envio(tem_email: bool) -> bool:
+    smtp_ok = smtp_configurado()
+    enviar = st.checkbox(
+        "Enviar certificados por e-mail ao gerar",
+        value=smtp_ok and tem_email,
+        disabled=not smtp_ok,
+        help="Cada participante recebe o PDF em anexo e o link de validação.",
+    )
+    if not smtp_ok:
+        st.caption("Envio de e-mail desativado: defina SMTP_HOST e SMTP_USER (ou SMTP_FROM_EMAIL) no servidor.")
+    elif enviar and not tem_email:
+        st.warning("Envie a planilha com a coluna de e-mail para que o disparo aconteça.")
+    return enviar
+
+
+def _aviso_regeracao():
+    if st.session_state.get("ultimo_lote"):
+        st.caption(
+            "Atenção: clicar em Gerar novamente emite certificados NOVOS, com novos "
+            "códigos, e reenvia os e-mails. Para apenas rebaixar o ZIP, use o botão abaixo."
+        )
+
+
+def _executar_geracao(names, participantes, render_fn, *, prefix, event_name, cert_type,
+                      event_date, workload, location, city, perfil_id, enviar_emails):
+    # Pré-voo: renderiza um certificado descartável antes de tocar banco ou disco.
+    # Um modelo que não renderiza falha aqui, sem deixar lote pela metade.
+    try:
+        render_fn("verificação", {}, "PREVOO-000000", build_validation_url("PREVOO-000000"))
+    except Exception as exc:
+        st.error(f"O modelo do certificado não pôde ser renderizado: {exc}")
+        return
+
+    barra = st.progress(0.0, text="Gerando certificados...")
+
+    def progresso(indice, total, nome):
+        rotulo = "Gerando e enviando" if enviar_emails else "Gerando"
+        barra.progress(indice / total, text=f"{rotulo} {indice}/{total} — {nome}")
+
+    try:
+        zip_bytes, rows, resumo = make_zip(
+            names, participantes, render_fn, prefix, event_name, cert_type,
+            event_date, workload, location, city, perfil_id=perfil_id,
+            enviar_emails=enviar_emails, progress_callback=progresso,
+        )
+    finally:
+        barra.empty()
+
+    # Guardar em sessao: o resultado precisa sobreviver aos reruns do Streamlit.
+    # Se o ZIP sumisse a cada interacao, o operador clicaria em Gerar de novo e
+    # emitiria certificados e e-mails duplicados.
+    st.session_state["ultimo_lote"] = {
+        "zip": zip_bytes, "rows": rows, "resumo": resumo, "enviou": enviar_emails,
+    }
+
 
 def render_generate_tab():
+    perfis = perfil_certificado.listar_perfis()
+    opcoes = [LEGADO_ID] + [p["id"] for p in perfis]
+    rotulos = {LEGADO_ID: LEGADO_ROTULO, **{p["id"]: p["nome"] for p in perfis}}
+    escolha = st.selectbox("Modelo do certificado", opcoes, format_func=lambda o: rotulos[o])
+    st.divider()
+
+    if escolha == LEGADO_ID:
+        _render_generate_legado()
+    else:
+        try:
+            perfil = perfil_certificado.carregar_perfil(escolha)
+        except perfil_certificado.PerfilInvalido as exc:
+            st.error(str(exc))
+            return
+        _render_generate_perfil(perfil)
+
+    render_ultimo_lote()
+
+
+def _render_generate_legado():
     left, right = st.columns([1.1, 0.9])
     with left:
         uploaded_template = st.file_uploader("Modelo do certificado em PDF", type=["pdf"])
@@ -759,19 +959,18 @@ def render_generate_tab():
         st.info("O QR Code usa a URL fixa do projeto e adiciona automaticamente o código único.")
 
     destinatarios = {}
-    planilha_com_erro = False
     if planilha is not None:
         try:
-            destinatarios = parse_planilha_destinatarios(planilha)
+            destinatarios = {
+                normalizar_nome_proprio(nome): email
+                for nome, email in parse_planilha_destinatarios(planilha).items()
+            }
         except ValueError as exc:
             st.error(str(exc))
-            planilha_com_erro = True
-
-    # Planilha ilegivel nao pode cair calado na lista de nomes do textarea:
-    # o operador acharia que os e-mails sairam.
-    if planilha_com_erro:
-        st.warning("Corrija a planilha e envie novamente. A geração está bloqueada até lá.")
-        return
+            # Planilha ilegivel nao pode cair calado na lista de nomes do textarea:
+            # o operador acharia que os e-mails sairam.
+            st.warning("Corrija a planilha e envie novamente. A geração está bloqueada até lá.")
+            return
 
     if destinatarios:
         names = list(destinatarios)
@@ -790,27 +989,12 @@ def render_generate_tab():
         with st.expander("Conferir nomes e e-mails da planilha"):
             st.dataframe(preview, use_container_width=True, hide_index=True)
     else:
-        names = split_names(names_raw)
+        names = [normalizar_nome_proprio(n) for n in split_names(names_raw)]
         if names:
             st.info(f"{len(names)} nome(s) identificado(s).")
 
-    smtp_ok = smtp_configurado()
-    enviar_emails = st.checkbox(
-        "Enviar certificados por e-mail ao gerar",
-        value=smtp_ok and bool(destinatarios),
-        disabled=not smtp_ok,
-        help="Cada participante recebe o PDF em anexo e o link de validação.",
-    )
-    if not smtp_ok:
-        st.caption("Envio de e-mail desativado: defina SMTP_HOST e SMTP_USER (ou SMTP_FROM_EMAIL) no servidor.")
-    elif enviar_emails and not destinatarios:
-        st.warning("Envie a planilha com a coluna de e-mail para que o disparo aconteça.")
-
-    if st.session_state.get("ultimo_lote"):
-        st.caption(
-            "Atenção: clicar em Gerar novamente emite certificados NOVOS, com novos "
-            "códigos, e reenvia os e-mails. Para apenas rebaixar o ZIP, use o botão abaixo."
-        )
+    enviar_emails = _checkbox_envio(bool(destinatarios))
+    _aviso_regeracao()
 
     if st.button("Gerar certificados com QR Code", type="primary"):
         try:
@@ -826,45 +1010,148 @@ def render_generate_tab():
             elif not names:
                 st.error("Cole pelo menos um nome na lista.")
             else:
-                barra = st.progress(0.0, text="Gerando certificados...")
-
-                def atualizar_progresso(indice, total, nome):
-                    rotulo = "Gerando e enviando" if enviar_emails else "Gerando"
-                    barra.progress(indice / total, text=f"{rotulo} {indice}/{total} — {nome}")
-
-                try:
-                    zip_bytes, rows, resumo = make_zip(
-                        template_bytes,
-                        names,
-                        body_text,
-                        replace_body,
-                        prefix,
-                        event_name,
-                        cert_type,
-                        event_date,
-                        workload,
-                        location,
-                        city,
-                        emails=destinatarios,
-                        enviar_emails=enviar_emails,
-                        progress_callback=atualizar_progresso,
-                    )
-                finally:
-                    barra.empty()
-
-                # Guardar em sessao: o resultado precisa sobreviver aos reruns do
-                # Streamlit. Se o ZIP sumisse a cada interacao, o operador clicaria
-                # em Gerar de novo e emitiria certificados e e-mails duplicados.
-                st.session_state["ultimo_lote"] = {
-                    "zip": zip_bytes,
-                    "rows": rows,
-                    "resumo": resumo,
-                    "enviou": enviar_emails,
-                }
+                participantes = {nome: {"email": email} for nome, email in destinatarios.items()}
+                _executar_geracao(
+                    names,
+                    participantes,
+                    certificado_legado(template_bytes, body_text, replace_body),
+                    prefix=prefix,
+                    event_name=event_name,
+                    cert_type=cert_type,
+                    event_date=event_date,
+                    workload=workload,
+                    location=location,
+                    city=city,
+                    perfil_id="",
+                    enviar_emails=enviar_emails,
+                )
         except Exception as exc:
             st.exception(exc)
 
-    render_ultimo_lote()
+
+def _render_generate_perfil(perfil: dict):
+    meta = perfil.get("metadados", {})
+    obrig = perfil.get("colunas_obrigatorias") or []
+
+    left, right = st.columns([1.1, 0.9])
+    with left:
+        if obrig:
+            st.caption(
+                "Este modelo exige planilha com as colunas: nome, email, "
+                + ", ".join(obrig)
+                + "."
+            )
+        planilha = st.file_uploader("Planilha de participantes (CSV ou XLSX)", type=["csv", "xlsx"])
+        names_raw = ""
+        if not obrig:
+            names_raw = st.text_area(
+                "Ou cole os nomes (um por linha)",
+                height=140,
+                placeholder="Maria da Silva\nJoão Pereira",
+            )
+
+    with right:
+        st.subheader("Dados do evento")
+        prefix = st.text_input("Prefixo do código", value=meta.get("prefixo", "CERT2026"))
+        event_name = st.text_input("Nome do evento", value=meta.get("evento", ""))
+        event_date = st.text_input("Data do evento", value=meta.get("data_evento", ""))
+        workload = st.text_input("Carga horária", value=meta.get("carga_horaria", ""))
+        location = st.text_input("Local", value=meta.get("local", ""))
+        city = st.text_input("Cidade", value=meta.get("cidade", ""))
+        st.info("O QR Code usa a URL fixa do projeto e adiciona automaticamente o código único.")
+
+    cert_type = meta.get("tipo_certificado") or perfil["nome"]
+
+    with st.expander("Pré-visualizar 1ª página"):
+        exemplo = {
+            "nome": "Fulana de Tal (exemplo)",
+            "cpf": "000.000.000-00",
+            "tema": "Título da palestra (exemplo)",
+            "horas": "4",
+        }
+        try:
+            amostra = perfil_certificado.renderizar(
+                perfil, exemplo, "EXEMPLO-000000", build_validation_url("EXEMPLO-000000")
+            )
+            doc = fitz.open(stream=amostra, filetype="pdf")
+            # width em pixels: compatível com todas as versões do Streamlit
+            # (use_column_width / use_container_width mudam de nome entre versões).
+            st.image(doc[0].get_pixmap(dpi=120).tobytes("png"), width=760)
+            doc.close()
+            st.caption(f"Ajuste as posições editando perfis/{perfil['id']}.json.")
+        except perfil_certificado.PerfilInvalido as exc:
+            st.error(str(exc))
+
+    participantes = {}
+    if planilha is not None:
+        try:
+            participantes = {
+                normalizar_nome_proprio(nome): dados
+                for nome, dados in parse_planilha(planilha).items()
+            }
+        except ValueError as exc:
+            st.error(str(exc))
+            st.warning("Corrija a planilha e envie novamente. A geração está bloqueada até lá.")
+            return
+
+    if participantes:
+        names = list(participantes)
+        linhas = []
+        algum_faltando = False
+        for nome, dados in participantes.items():
+            faltas = perfil_certificado.campos_faltando(perfil, {"nome": nome, **dados})
+            algum_faltando = algum_faltando or bool(faltas)
+            email = dados.get("email", "")
+            linhas.append(
+                {
+                    "nome": nome,
+                    "email": email or "(sem e-mail)",
+                    "situação e-mail": "ok" if email_valido(email) else ("sem e-mail" if not email else "inválido"),
+                    "campos faltando": ", ".join(faltas) or "—",
+                }
+            )
+        st.info(f"{len(names)} participante(s) na planilha.")
+        with st.expander("Conferir participantes"):
+            st.dataframe(pd.DataFrame(linhas), use_container_width=True, hide_index=True)
+        if algum_faltando:
+            st.warning(
+                "Alguns certificados sairão com campos em branco — confira a coluna "
+                "'campos faltando'."
+            )
+    elif obrig:
+        st.info("Envie a planilha para continuar.")
+        return
+    else:
+        names = [normalizar_nome_proprio(n) for n in split_names(names_raw)]
+        participantes = {nome: {"email": ""} for nome in names}
+        if names:
+            st.info(f"{len(names)} nome(s) identificado(s).")
+
+    if not names:
+        return
+
+    tem_email = any((dados.get("email") or "").strip() for dados in participantes.values())
+    enviar_emails = _checkbox_envio(tem_email)
+    _aviso_regeracao()
+
+    if st.button("Gerar certificados com QR Code", type="primary"):
+        try:
+            _executar_geracao(
+                names,
+                participantes,
+                certificado_por_perfil(perfil),
+                prefix=prefix,
+                event_name=event_name,
+                cert_type=cert_type,
+                event_date=event_date,
+                workload=workload,
+                location=location,
+                city=city,
+                perfil_id=perfil["id"],
+                enviar_emails=enviar_emails,
+            )
+        except Exception as exc:
+            st.exception(exc)
 
 
 def resend_certificate_email(code: str, email_informado: str = ""):

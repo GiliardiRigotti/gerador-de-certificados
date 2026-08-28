@@ -32,6 +32,21 @@ EMAIL_REGEX = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[A-Za-z]{2,}$")
 NOME_ALIASES = {"nome", "name", "participante", "nomecompleto", "nomedoparticipante"}
 EMAIL_ALIASES = {"email", "mail", "correio", "emaildoparticipante", "enderecodeemail"}
 
+# Colunas opcionais usadas pelos perfis de certificado (ex.: palestrante).
+# Ausentes = campo vazio, nunca erro. Chave interna -> nomes aceitos (sem acento).
+COLUNAS_EXTRAS = {
+    "cpf": {"cpf", "documento", "doc", "cpfdopalestrante"},
+    "tema": {"tema", "temapalestra", "temadapalestra", "titulo", "assunto", "palestra"},
+    "horas": {
+        "horas",
+        "horaspalestra",
+        "horasdapalestra",
+        "cargahorariapalestra",
+        "cargahorariadapalestra",
+        "duracao",
+    },
+}
+
 ERRO_SEM_CONFIG = "SMTP nao configurado"
 ERRO_EMAIL_INVALIDO = "endereco invalido"
 ERRO_DESATIVADO = "envio desativado"
@@ -85,16 +100,30 @@ def _nome_arquivo_padrao(nome: str) -> str:
     return f"certificado_{limpo or 'certificado'}.pdf"
 
 
-def _localizar_colunas(colunas):
-    coluna_nome = None
-    coluna_email = None
+def _mapear_colunas(colunas) -> dict:
+    """Casa os cabeçalhos da planilha com as chaves internas.
+
+    Devolve ``{"nome": <col>, "email": <col>, "cpf": <col>, ...}`` apenas para as
+    chaves encontradas. A primeira coluna que casa vence.
+    """
+    achado = {}
     for coluna in colunas:
         chave = _normalizar(coluna)
-        if coluna_nome is None and chave in NOME_ALIASES:
-            coluna_nome = coluna
-        elif coluna_email is None and chave in EMAIL_ALIASES:
-            coluna_email = coluna
-    return coluna_nome, coluna_email
+        if "nome" not in achado and chave in NOME_ALIASES:
+            achado["nome"] = coluna
+        elif "email" not in achado and chave in EMAIL_ALIASES:
+            achado["email"] = coluna
+        else:
+            for interna, aliases in COLUNAS_EXTRAS.items():
+                if interna not in achado and chave in aliases:
+                    achado[interna] = coluna
+                    break
+    return achado
+
+
+def _localizar_colunas(colunas):
+    mapa = _mapear_colunas(colunas)
+    return mapa.get("nome"), mapa.get("email")
 
 
 def _ler_csv(arquivo, encoding: str, separador: str) -> pd.DataFrame:
@@ -141,11 +170,16 @@ def _ler_planilha(arquivo) -> pd.DataFrame:
     ) from ultimo_erro
 
 
-def parse_planilha_destinatarios(arquivo) -> dict:
-    """Le CSV/XLSX e devolve {nome: email} preservando a ordem do arquivo.
+def _celula(valor) -> str:
+    return "" if pd.isna(valor) else str(valor).strip()
 
-    Nomes repetidos mantem a primeira ocorrencia, igual ao dedupe de split_names.
-    E-mail ausente vira string vazia — nao e erro.
+
+def parse_planilha(arquivo) -> dict:
+    """Le CSV/XLSX e devolve ``{nome: {"email", "cpf", "tema", "horas"}}``.
+
+    Preserva a ordem do arquivo. Nomes repetidos mantem a primeira ocorrencia,
+    igual ao dedupe de split_names. So 'nome' e 'email' sao obrigatorios; as
+    colunas extras ausentes viram string vazia — nao e erro.
     Levanta ValueError apenas quando o arquivo e inutilizavel.
     """
     try:
@@ -158,36 +192,44 @@ def parse_planilha_destinatarios(arquivo) -> dict:
     if df.empty:
         raise ValueError("A planilha esta vazia.")
 
-    coluna_nome, coluna_email = _localizar_colunas(df.columns)
-    if coluna_nome is None:
+    mapa = _mapear_colunas(df.columns)
+    if "nome" not in mapa:
         raise ValueError("A planilha precisa de uma coluna 'nome'.")
-    if coluna_email is None:
+    if "email" not in mapa:
         raise ValueError("A planilha precisa de uma coluna 'email'.")
 
-    destinatarios = {}
+    extras = [chave for chave in COLUNAS_EXTRAS if chave in mapa]
+    participantes = {}
     vistos = set()
-    for nome, email in zip(df[coluna_nome], df[coluna_email]):
-        nome = "" if pd.isna(nome) else str(nome).strip()
+    for _, linha in df.iterrows():
+        nome = _celula(linha[mapa["nome"]])
         if not nome:
             continue
         chave = nome.lower()
         if chave in vistos:
             continue
         vistos.add(chave)
-        email = "" if pd.isna(email) else str(email).strip()
-        destinatarios[nome] = email
+        registro = {"email": _celula(linha[mapa["email"]])}
+        for extra in COLUNAS_EXTRAS:
+            registro[extra] = _celula(linha[mapa[extra]]) if extra in extras else ""
+        participantes[nome] = registro
 
-    if not destinatarios:
+    if not participantes:
         raise ValueError("Nenhum nome valido encontrado na planilha.")
 
     # Rede de seguranca: nome que e um endereco de e-mail significa colunas
     # desalinhadas. Sem isso o certificado sai impresso com o e-mail no lugar do nome.
-    if any(email_valido(nome) for nome in destinatarios):
+    if any(email_valido(nome) for nome in participantes):
         raise ValueError(
             "As colunas parecem trocadas: ha e-mail na coluna de nome. "
             "Confira o cabecalho e os separadores da planilha."
         )
-    return destinatarios
+    return participantes
+
+
+def parse_planilha_destinatarios(arquivo) -> dict:
+    """Compat: ``{nome: email}``. Usa parse_planilha por baixo."""
+    return {nome: dados["email"] for nome, dados in parse_planilha(arquivo).items()}
 
 
 def montar_mensagem(destino: str, nome: str, codigo: str, pdf_bytes: bytes, url_validacao: str, evento: str = "", nome_arquivo: str = None) -> EmailMessage:

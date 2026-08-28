@@ -40,6 +40,61 @@ def test_email_valido_rejeita_enderecos_incorretos(valor):
     assert not email_sender.email_valido(valor)
 
 
+# --- parse_planilha (colunas extras) -----------------------------------
+
+
+def test_parse_planilha_le_colunas_extras():
+    arquivo = csv_fake(
+        "nome;email;cpf;tema;horas\n"
+        "João Palestra;joao@ex.com;123.456.789-00;Vigilância em portos;4\n"
+    )
+    assert email_sender.parse_planilha(arquivo) == {
+        "João Palestra": {
+            "email": "joao@ex.com",
+            "cpf": "123.456.789-00",
+            "tema": "Vigilância em portos",
+            "horas": "4",
+        }
+    }
+
+
+def test_parse_planilha_aliases_sem_acento_e_maiuscula():
+    arquivo = csv_fake(
+        "Nome;E-mail;Documento;Tema da Palestra;Carga Horária Palestra\n"
+        "Ana;ana@ex.com;111;Boas práticas;2\n"
+    )
+    assert email_sender.parse_planilha(arquivo)["Ana"] == {
+        "email": "ana@ex.com",
+        "cpf": "111",
+        "tema": "Boas práticas",
+        "horas": "2",
+    }
+
+
+def test_parse_planilha_colunas_extras_ausentes_viram_vazio():
+    arquivo = csv_fake("nome;email\nMaria;maria@ex.com\n")
+    assert email_sender.parse_planilha(arquivo)["Maria"] == {
+        "email": "maria@ex.com",
+        "cpf": "",
+        "tema": "",
+        "horas": "",
+    }
+
+
+def test_parse_planilha_celula_extra_vazia():
+    arquivo = csv_fake("nome;email;cpf;tema;horas\nZé;ze@ex.com;;;\n")
+    registro = email_sender.parse_planilha(arquivo)["Zé"]
+    assert registro["cpf"] == "" and registro["tema"] == "" and registro["horas"] == ""
+
+
+def test_parse_planilha_destinatarios_wrapper_inalterado():
+    arquivo = csv_fake("nome;email;cpf\nMaria;maria@ex.com;999\nAna;ana@ex.com;888\n")
+    assert email_sender.parse_planilha_destinatarios(arquivo) == {
+        "Maria": "maria@ex.com",
+        "Ana": "ana@ex.com",
+    }
+
+
 # --- parse_planilha_destinatarios ----------------------------------------
 
 

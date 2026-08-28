@@ -1,0 +1,77 @@
+{
+  "id": "oficina-palestrante",
+  "nome": "Oficina Regional de Vigilância Sanitária — Palestrante",
+  "pdf": "modelos/oficina-palestrante.pdf",
+  "pagina": [870.0, 624.0],
+  "colunas_obrigatorias": ["cpf", "tema", "horas"],
+  "metadados": {
+    "prefixo": "ORVS2026",
+    "evento": "Oficina Regional de Qualidade em Vigilância Sanitária",
+    "tipo_certificado": "Palestrante",
+    "data_evento": "27 de agosto de 2026",
+    "carga_horaria": "8 horas",
+    "local": "Balneário Camboriú",
+    "cidade": "Balneário Camboriú"
+  },
+  "campos": [
+    {
+      "campo": "nome",
+      "tipo": "linha",
+      "x": 376,
+      "y": 292,
+      "tamanho": 12,
+      "tamanho_min": 8,
+      "fonte": "helv",
+      "cor": [0.02, 0.13, 0.34],
+      "alinhamento": "left",
+      "maiusculas": false,
+      "largura_max": 308
+    },
+    {
+      "campo": "cpf",
+      "tipo": "linha",
+      "x": 198,
+      "y": 322,
+      "tamanho": 11,
+      "tamanho_min": 8,
+      "fonte": "helv",
+      "cor": [0.02, 0.13, 0.34],
+      "alinhamento": "left",
+      "maiusculas": false,
+      "largura_max": 125
+    },
+    {
+      "campo": "tema",
+      "tipo": "linha",
+      "x": 147,
+      "y": 418,
+      "tamanho": 11,
+      "tamanho_min": 6.5,
+      "fonte": "helv",
+      "cor": [0.02, 0.13, 0.34],
+      "alinhamento": "left",
+      "maiusculas": false,
+      "largura_max": 488
+    },
+    {
+      "campo": "horas",
+      "tipo": "linha",
+      "x": 760,
+      "y": 418,
+      "tamanho": 11,
+      "tamanho_min": 7,
+      "fonte": "helv",
+      "cor": [0.02, 0.13, 0.34],
+      "alinhamento": "left",
+      "maiusculas": false,
+      "largura_max": 46
+    }
+  ],
+  "qr": {
+    "mostrar": true,
+    "x": 776,
+    "y": 448,
+    "tamanho": 68,
+    "rotulo": true
+  }
+}

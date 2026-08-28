@@ -13,3 +13,9 @@ login_debug.log
 
 # Credenciais de MCP (contem token de API)
 .mcp.json
+
+# Planilhas de participantes (contem nomes e CPF)
+palestrantes_*.csv
+participantes_*.csv
+checkins_*.xlsx
+*_emails_*.xlsx
