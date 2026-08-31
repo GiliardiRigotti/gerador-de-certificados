@@ -537,6 +537,34 @@ def certificado_por_perfil(perfil):
     return _render
 
 
+def filtrar_participantes_por_grupo(perfil: dict, participantes: dict):
+    """Separa os participantes cujo 'grupo' casa com o ``filtro_grupo`` do perfil.
+
+    Devolve ``(mantidos, relatorio)``. Quando a planilha não traz a coluna 'grupo'
+    (nenhum valor preenchido) não há como filtrar: mantém todo mundo e sinaliza
+    ``tem_coluna=False`` para a UI avisar o operador.
+    """
+    aceitos = perfil_certificado.filtro_grupo(perfil)
+    vazio = {"aplicou": False, "tem_coluna": False, "fora": [], "sem_valor": []}
+    if not aceitos:
+        return dict(participantes), vazio
+
+    valores = {n: (d.get("grupo") or "").strip() for n, d in participantes.items()}
+    if not any(valores.values()):
+        return dict(participantes), vazio
+
+    mantidos, fora, sem_valor = {}, [], []
+    for nome, dados in participantes.items():
+        grupo = valores[nome]
+        if not grupo:
+            sem_valor.append(nome)
+        elif perfil_certificado.normalizar_grupo(grupo) in aceitos:
+            mantidos[nome] = dados
+        else:
+            fora.append((nome, grupo))
+    return mantidos, {"aplicou": True, "tem_coluna": True, "fora": fora, "sem_valor": sem_valor}
+
+
 def make_zip(names, participantes, render_fn, prefix: str, event_name: str, cert_type: str, event_date: str, workload: str, location: str, city: str, perfil_id: str = "", enviar_emails: bool = False, progress_callback=None):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     zip_buffer = io.BytesIO()
@@ -1033,6 +1061,8 @@ def _render_generate_perfil(perfil: dict):
     meta = perfil.get("metadados", {})
     obrig = perfil.get("colunas_obrigatorias") or []
 
+    grupos_perfil = perfil.get("filtro_grupo") or []
+
     left, right = st.columns([1.1, 0.9])
     with left:
         if obrig:
@@ -1040,6 +1070,12 @@ def _render_generate_perfil(perfil: dict):
                 "Este modelo exige planilha com as colunas: nome, email, "
                 + ", ".join(obrig)
                 + "."
+            )
+        if grupos_perfil:
+            st.caption(
+                "Este modelo só emite para quem está na coluna 'grupo' como: "
+                + ", ".join(f"'{g}'" for g in grupos_perfil)
+                + ". Suba a planilha completa — as demais linhas são ignoradas."
             )
         planilha = st.file_uploader("Planilha de participantes (CSV ou XLSX)", type=["csv", "xlsx"])
         names_raw = ""
@@ -1093,6 +1129,31 @@ def _render_generate_perfil(perfil: dict):
             st.error(str(exc))
             st.warning("Corrija a planilha e envie novamente. A geração está bloqueada até lá.")
             return
+
+    if participantes and grupos_perfil:
+        total_planilha = len(participantes)
+        participantes, relatorio_grupo = filtrar_participantes_por_grupo(perfil, participantes)
+        if not relatorio_grupo["tem_coluna"]:
+            st.warning(
+                "A planilha não tem a coluna 'grupo' preenchida — não dá para separar "
+                f"por período. Os {total_planilha} nomes serão usados como estão."
+            )
+        else:
+            fora = relatorio_grupo["fora"]
+            sem_valor = relatorio_grupo["sem_valor"]
+            st.info(
+                f"{len(participantes)} de {total_planilha} nomes se encaixam neste "
+                f"modelo ({', '.join(grupos_perfil)}). "
+                f"{len(fora) + len(sem_valor)} ficam de fora."
+            )
+            if fora or sem_valor:
+                with st.expander(f"Ver os {len(fora) + len(sem_valor)} nomes ignorados"):
+                    ignorados = [{"nome": n, "grupo": g} for n, g in fora]
+                    ignorados += [{"nome": n, "grupo": "(em branco)"} for n in sem_valor]
+                    st.dataframe(pd.DataFrame(ignorados), use_container_width=True, hide_index=True)
+            if not participantes:
+                st.error("Nenhum nome da planilha se encaixa neste modelo. Nada a gerar.")
+                return
 
     if participantes:
         names = list(participantes)

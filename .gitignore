@@ -6,6 +6,7 @@ certificados.db
 certificados_emitidos.csv
 certificados_gerados/
 tmp/
+.docker-data/
 
 .env
 .streamlit/secrets.toml

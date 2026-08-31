@@ -1,16 +1,16 @@
 {
-  "id": "oficina-convidado",
-  "nome": "Oficina Regional de Vigilância Sanitária — Convidado",
-  "pdf": "modelos/oficina-convidado.pdf",
-  "pagina": [869.7, 623.8],
+  "id": "oficina-convidado-4h",
+  "nome": "Oficina Regional de Vigilância Sanitária — Convidado (4h, meio período)",
+  "pdf": "modelos/oficina-convidado-4h.pdf",
+  "pagina": [870.0, 624.0],
   "colunas_obrigatorias": [],
-  "filtro_grupo": ["Manhã e tarde"],
+  "filtro_grupo": ["Só manhã", "Só tarde"],
   "metadados": {
     "prefixo": "ORVS2026",
     "evento": "Oficina Regional de Qualidade em Vigilância Sanitária",
     "tipo_certificado": "Participação",
     "data_evento": "27 de agosto de 2026",
-    "carga_horaria": "8 horas",
+    "carga_horaria": "4 horas",
     "local": "Balneário Camboriú",
     "cidade": "Balneário Camboriú"
   },

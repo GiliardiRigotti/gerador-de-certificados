@@ -29,7 +29,7 @@ from config import (
 
 EMAIL_REGEX = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[A-Za-z]{2,}$")
 
-NOME_ALIASES = {"nome", "name", "participante", "nomecompleto", "nomedoparticipante"}
+NOME_ALIASES = {"nome", "name", "participante", "pessoa", "nomecompleto", "nomedoparticipante"}
 EMAIL_ALIASES = {"email", "mail", "correio", "emaildoparticipante", "enderecodeemail"}
 
 # Colunas opcionais usadas pelos perfis de certificado (ex.: palestrante).
@@ -45,6 +45,9 @@ COLUNAS_EXTRAS = {
         "cargahorariadapalestra",
         "duracao",
     },
+    # Coluna que diz se a pessoa fez o dia todo ou só um período. Os perfis de
+    # certificado usam esse valor no 'filtro_grupo' para separar 8h de 4h.
+    "grupo": {"grupo", "periodo", "turno"},
 }
 
 ERRO_SEM_CONFIG = "SMTP nao configurado"

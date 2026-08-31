@@ -103,6 +103,51 @@ def test_make_zip_perfil_convidado_so_nome(app):
     assert linha["cpf"] == "" and linha["tema"] == "" and linha["horas"] == ""
 
 
+# --- filtro por grupo (meio período x dia todo) ------------------------
+
+
+def test_filtrar_participantes_por_grupo_separa_meio_periodo(app):
+    import perfil_certificado
+
+    perfil = perfil_certificado.carregar_perfil("oficina-convidado-4h")
+    participantes = {
+        "Ana Manha": {"email": "a@ex.com", "grupo": "Só manhã"},
+        "Bia Tarde": {"email": "b@ex.com", "grupo": "Só tarde"},
+        "Caio Dia Todo": {"email": "c@ex.com", "grupo": "Manhã e tarde"},
+        "Davi Sem Grupo": {"email": "d@ex.com", "grupo": ""},
+    }
+    mantidos, relatorio = app.filtrar_participantes_por_grupo(perfil, participantes)
+    assert set(mantidos) == {"Ana Manha", "Bia Tarde"}
+    assert relatorio["tem_coluna"] is True
+    assert [n for n, _ in relatorio["fora"]] == ["Caio Dia Todo"]
+    assert relatorio["sem_valor"] == ["Davi Sem Grupo"]
+
+
+def test_filtrar_participantes_por_grupo_convidado_8h(app):
+    import perfil_certificado
+
+    perfil = perfil_certificado.carregar_perfil("oficina-convidado")
+    participantes = {
+        "Ana Manha": {"email": "", "grupo": "Só manhã"},
+        "Caio Dia Todo": {"email": "", "grupo": "Manhã e tarde"},
+    }
+    mantidos, _ = app.filtrar_participantes_por_grupo(perfil, participantes)
+    assert set(mantidos) == {"Caio Dia Todo"}
+
+
+def test_filtrar_participantes_sem_coluna_grupo_mantem_todos(app):
+    import perfil_certificado
+
+    perfil = perfil_certificado.carregar_perfil("oficina-convidado-4h")
+    participantes = {
+        "Ana": {"email": "a@ex.com"},
+        "Bia": {"email": "b@ex.com"},
+    }
+    mantidos, relatorio = app.filtrar_participantes_por_grupo(perfil, participantes)
+    assert set(mantidos) == {"Ana", "Bia"}
+    assert relatorio["tem_coluna"] is False
+
+
 # --- ramo legado segue funcionando --------------------------------------
 
 

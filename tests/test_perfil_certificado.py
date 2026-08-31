@@ -189,6 +189,47 @@ def test_validar_perfil_aceita_valido(perfil_basico):
     assert pc.validar_perfil(perfil_basico) is perfil_basico
 
 
+# --- filtro_grupo ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "valor, normal",
+    [("Só manhã", "somanha"), (" SÓ TARDE ", "sotarde"),
+     ("Manhã e tarde", "manhaetarde"), (None, ""), ("", "")],
+)
+def test_normalizar_grupo(valor, normal):
+    assert pc.normalizar_grupo(valor) == normal
+
+
+def test_grupo_aceito_sem_filtro_aceita_qualquer_coisa(perfil_basico):
+    assert pc.grupo_aceito(perfil_basico, "qualquer") is True
+    assert pc.grupo_aceito(perfil_basico, "") is True
+
+
+def test_grupo_aceito_com_filtro_ignora_acento_e_caixa(perfil_basico):
+    perfil_basico["filtro_grupo"] = ["Só manhã", "Só tarde"]
+    assert pc.grupo_aceito(perfil_basico, "SO MANHA")
+    assert pc.grupo_aceito(perfil_basico, "só tarde")
+    assert not pc.grupo_aceito(perfil_basico, "Manhã e tarde")
+    assert not pc.grupo_aceito(perfil_basico, "")
+
+
+@pytest.mark.parametrize(
+    "valor, trecho",
+    [("Só manhã", "lista não vazia"), ([], "lista não vazia"), (["Só manhã", " "], "valor vazio")],
+)
+def test_validar_perfil_rejeita_filtro_grupo_invalido(perfil_basico, valor, trecho):
+    perfil_basico["filtro_grupo"] = valor
+    with pytest.raises(pc.PerfilInvalido) as exc:
+        pc.validar_perfil(perfil_basico)
+    assert trecho in str(exc.value)
+
+
+def test_validar_perfil_aceita_filtro_grupo_valido(perfil_basico):
+    perfil_basico["filtro_grupo"] = ["Só manhã", "Só tarde"]
+    assert pc.validar_perfil(perfil_basico) is perfil_basico
+
+
 # --- carregar_perfil / listar_perfis (perfis reais do projeto) --------------
 
 
@@ -204,7 +245,20 @@ def test_carregar_perfil_json_invalido(tmp_path, monkeypatch):
 def test_perfis_do_projeto_sao_validos():
     perfis = pc.listar_perfis()
     ids = {p["id"] for p in perfis}
-    assert {"oficina-convidado", "oficina-palestrante"} <= ids
+    assert {"oficina-convidado", "oficina-convidado-4h", "oficina-palestrante"} <= ids
+
+
+def test_perfil_convidado_4h_filtra_meio_periodo():
+    perfil = pc.carregar_perfil("oficina-convidado-4h")
+    assert pc.grupo_aceito(perfil, "Só manhã")
+    assert pc.grupo_aceito(perfil, "Só tarde")
+    assert not pc.grupo_aceito(perfil, "Manhã e tarde")
+
+
+def test_perfil_convidado_8h_filtra_dia_todo():
+    perfil = pc.carregar_perfil("oficina-convidado")
+    assert pc.grupo_aceito(perfil, "Manhã e tarde")
+    assert not pc.grupo_aceito(perfil, "Só manhã")
 
 
 def test_listar_perfis_ignora_invalidos(tmp_path, monkeypatch):

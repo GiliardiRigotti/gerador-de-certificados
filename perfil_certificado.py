@@ -11,6 +11,8 @@ de erro destinada à tela: ``PerfilInvalido`` carrega texto seguro.
 
 import io
 import json
+import re
+import unicodedata
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -28,11 +30,33 @@ BRANCO = (1, 1, 1)
 
 # Chaves de dados que o app sabe preencher. Um campo do perfil que referencie
 # outra chave é aceito na validação, mas fica em branco se o dado não vier.
-CHAVES_DADOS = {"nome", "cpf", "tema", "horas"}
+CHAVES_DADOS = {"nome", "cpf", "tema", "horas", "grupo"}
 
 
 class PerfilInvalido(ValueError):
     """Perfil malformado ou incompleto. A mensagem é segura para exibir."""
+
+
+def normalizar_grupo(valor) -> str:
+    """Minúsculas, sem acento e sem separadores. 'Só manhã ' -> 'somanha'.
+
+    Serve para casar o valor da coluna 'Grupo' da planilha com o ``filtro_grupo``
+    do perfil sem depender de acento, caixa ou espaço.
+    """
+    texto = unicodedata.normalize("NFKD", str(valor or ""))
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return re.sub(r"[\s_\-.]", "", texto).strip().lower()
+
+
+def filtro_grupo(perfil: dict) -> list:
+    """Lista normalizada de grupos aceitos pelo perfil, ou ``[]`` se não filtra."""
+    return [normalizar_grupo(v) for v in (perfil.get("filtro_grupo") or [])]
+
+
+def grupo_aceito(perfil: dict, valor) -> bool:
+    """Se o perfil não declara ``filtro_grupo``, aceita qualquer grupo."""
+    aceitos = filtro_grupo(perfil)
+    return not aceitos or normalizar_grupo(valor) in aceitos
 
 
 def _num(valor, campo_nome, contexto):
@@ -120,6 +144,17 @@ def validar_perfil(perfil: dict) -> dict:
     obrig = perfil.get("colunas_obrigatorias", [])
     if not isinstance(obrig, list):
         raise PerfilInvalido(f"Perfil '{ident}': 'colunas_obrigatorias' deve ser lista.")
+
+    grupos = perfil.get("filtro_grupo")
+    if grupos is not None:
+        if not isinstance(grupos, list) or not grupos:
+            raise PerfilInvalido(
+                f"Perfil '{ident}': 'filtro_grupo' deve ser uma lista não vazia."
+            )
+        if any(not str(g).strip() for g in grupos):
+            raise PerfilInvalido(
+                f"Perfil '{ident}': 'filtro_grupo' tem um valor vazio."
+            )
 
     return perfil
 
